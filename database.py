@@ -7,6 +7,7 @@ import os
 from contextlib import contextmanager
 from typing import Optional
 
+import pandas as pd
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -29,6 +30,91 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def init_db() -> None:
     """Create all tables. Safe to call multiple times (idempotent)."""
     Base.metadata.create_all(bind=engine)
+    # Auto-seed if SQLite and empty (useful for Streamlit Cloud deployment)
+    if DATABASE_URL.startswith("sqlite"):
+        auto_seed_if_empty()
+
+
+def auto_seed_if_empty() -> None:
+    """
+    Check if the candidate table is empty. If so, seed from the provided CSV.
+    """
+    with get_session() as session:
+        count = session.query(func.count(Candidate.id)).scalar()
+        if count == 0:
+            csv_path = "Copy of DevCatalyst-recruitment-forms - Sheet1.csv"
+            if os.path.exists(csv_path):
+                print(f"Database empty. Auto-seeding from {csv_path}...")
+                _seed_from_csv(session, csv_path)
+            else:
+                print(f"Database empty but {csv_path} not found. Skipping auto-seed.")
+
+
+def _seed_from_csv(session: Session, csv_path: str) -> None:
+    """Internal helper to parse and load candidates from CSV."""
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        print(f"Error reading CSV during auto-seed: {e}")
+        return
+
+    team_map = {
+        "Technical Track": "Technical",
+        "Technical": "Technical",
+        "Content Writing and PR": "Content",
+        "Content": "Content",
+        "Outreach and Sponsorship": "Outreach",
+        "Outreach": "Outreach",
+        "Social Media and Graphic Design": "Social",
+        "Social": "Social"
+    }
+
+    candidates_to_add = []
+    seen_emails = set()
+
+    for _, row in df.iterrows():
+        email = str(row.get("Email", "")).lower().strip()
+        if not email or email in seen_emails:
+            continue
+        
+        raw_track = str(row.get("Selected Track", ""))
+        team = "Technical" 
+        for key, val in team_map.items():
+            if key.lower() in raw_track.lower():
+                team = val
+                break
+        
+        portfolio = str(row.get("GitHub", ""))
+        if not portfolio or portfolio == "nan":
+            portfolio = str(row.get("Portfolio Link", ""))
+        if not portfolio or portfolio == "nan":
+            portfolio = str(row.get("Portfolio", ""))
+            
+        reason = str(row.get("Why Join", ""))
+        goals = str(row.get("Goals", ""))
+        notes = f"Roll: {row.get('Roll Number', '')}\nSection: {row.get('Section', '')}\n\nWhy Join: {reason}\n\nGoals: {goals}"
+
+        data = {
+            "name": str(row.get("Full Name", "Unknown")),
+            "email": email,
+            "phone": str(row.get("Phone", "")),
+            "branch": str(row.get("Branch", "Other")),
+            "year": "1st Year",
+            "team_applied": team,
+            "github_or_portfolio": portfolio if portfolio != "nan" else "",
+            "notes": notes,
+            "status": "Pending",
+            "stage": "Applied"
+        }
+        
+        candidate = Candidate(**data)
+        candidate.recalculate_total()
+        candidates_to_add.append(candidate)
+        seen_emails.add(email)
+
+    if candidates_to_add:
+        session.add_all(candidates_to_add)
+        print(f"Auto-seeded {len(candidates_to_add)} candidates.")
 
 
 @contextmanager
