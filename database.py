@@ -38,20 +38,24 @@ def init_db() -> None:
 def auto_seed_if_empty() -> None:
     """
     Check if the candidate table is empty. If so, seed from the provided CSV.
+    Wraps everything in a try-except to ensure the app starts regardless.
     """
-    with get_session() as session:
-        count = session.query(func.count(Candidate.id)).scalar()
-        if count == 0:
-            csv_path = "Copy of DevCatalyst-recruitment-forms - Sheet1.csv"
-            if os.path.exists(csv_path):
-                print(f"Database empty. Auto-seeding from {csv_path}...")
-                _seed_from_csv(session, csv_path)
-            else:
-                print(f"Database empty but {csv_path} not found. Skipping auto-seed.")
+    try:
+        with get_session() as session:
+            count = session.query(func.count(Candidate.id)).scalar()
+            if count == 0:
+                csv_path = "Copy of DevCatalyst-recruitment-forms - Sheet1.csv"
+                if os.path.exists(csv_path):
+                    print(f"Database empty. Auto-seeding from {csv_path}...")
+                    _seed_from_csv(csv_path)
+                else:
+                    print(f"Database empty but {csv_path} not found. Skipping auto-seed.")
+    except Exception as e:
+        print(f"Auto-seed failed (gracefully skipping): {e}")
 
 
-def _seed_from_csv(session: Session, csv_path: str) -> None:
-    """Internal helper to parse and load candidates from CSV."""
+def _seed_from_csv(csv_path: str) -> None:
+    """Internal helper to parse and load candidates from CSV one-by-one."""
     try:
         df = pd.read_csv(csv_path)
     except Exception as e:
@@ -69,52 +73,61 @@ def _seed_from_csv(session: Session, csv_path: str) -> None:
         "Social": "Social"
     }
 
-    candidates_to_add = []
-    seen_emails = set()
-
+    print(f"Processing {len(df)} rows for auto-seed...")
+    imported = 0
+    
     for _, row in df.iterrows():
         email = str(row.get("Email", "")).lower().strip()
-        if not email or email in seen_emails:
+        if not email or email == "nan":
             continue
         
-        raw_track = str(row.get("Selected Track", ""))
-        team = "Technical" 
-        for key, val in team_map.items():
-            if key.lower() in raw_track.lower():
-                team = val
-                break
-        
-        portfolio = str(row.get("GitHub", ""))
-        if not portfolio or portfolio == "nan":
-            portfolio = str(row.get("Portfolio Link", ""))
-        if not portfolio or portfolio == "nan":
-            portfolio = str(row.get("Portfolio", ""))
+        # Check if already exists (another guard against duplicates)
+        with get_session() as session:
+            exists = session.query(Candidate).filter(Candidate.email == email).first()
+            if exists:
+                continue
+
+            raw_track = str(row.get("Selected Track", ""))
+            team = "Technical" 
+            for key, val in team_map.items():
+                if key.lower() in raw_track.lower():
+                    team = val
+                    break
             
-        reason = str(row.get("Why Join", ""))
-        goals = str(row.get("Goals", ""))
-        notes = f"Roll: {row.get('Roll Number', '')}\nSection: {row.get('Section', '')}\n\nWhy Join: {reason}\n\nGoals: {goals}"
+            portfolio = str(row.get("GitHub", ""))
+            if not portfolio or portfolio == "nan":
+                portfolio = str(row.get("Portfolio Link", ""))
+            if not portfolio or portfolio == "nan":
+                portfolio = str(row.get("Portfolio", ""))
+                
+            reason = str(row.get("Why Join", ""))
+            goals = str(row.get("Goals", ""))
+            notes = f"Roll: {row.get('Roll Number', '')}\nSection: {row.get('Section', '')}\n\nWhy Join: {reason}\n\nGoals: {goals}"
 
-        data = {
-            "name": str(row.get("Full Name", "Unknown")),
-            "email": email,
-            "phone": str(row.get("Phone", "")),
-            "branch": str(row.get("Branch", "Other")),
-            "year": "1st Year",
-            "team_applied": team,
-            "github_or_portfolio": portfolio if portfolio != "nan" else "",
-            "notes": notes,
-            "status": "Pending",
-            "stage": "Applied"
-        }
-        
-        candidate = Candidate(**data)
-        candidate.recalculate_total()
-        candidates_to_add.append(candidate)
-        seen_emails.add(email)
+            data = {
+                "name": str(row.get("Full Name", "Unknown")),
+                "email": email,
+                "phone": str(row.get("Phone", "")),
+                "branch": str(row.get("Branch", "Other")),
+                "year": "1st Year",
+                "team_applied": team,
+                "github_or_portfolio": portfolio if portfolio != "nan" else "",
+                "notes": notes,
+                "status": "Pending",
+                "stage": "Applied"
+            }
+            
+            try:
+                candidate = Candidate(**data)
+                candidate.recalculate_total()
+                session.add(candidate)
+                # Commit happens automatically via get_session()
+                imported += 1
+            except Exception as e:
+                print(f"Skipping candidate {email} due to error: {e}")
+                # Rollback happens automatically via get_session()
 
-    if candidates_to_add:
-        session.add_all(candidates_to_add)
-        print(f"Auto-seeded {len(candidates_to_add)} candidates.")
+    print(f"Auto-seeded {imported} candidates successfully.")
 
 
 @contextmanager
